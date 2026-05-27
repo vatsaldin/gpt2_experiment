@@ -175,7 +175,47 @@ class HighContextQAModel(nn.Module):
         return start_logits, end_logits, loss
 
 # ==========================================
-# 6. DATA SIMULATION (FOR EXECUTION TESTING)
+# 6. MASKED LANGUAGE MODEL TOPOLOGY (PRE-TRAINING)
+# ==========================================
+class HighContextMLMModel(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.type_vocab_size, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            h = nn.ModuleList([QAEncoderBlock(config) for _ in range(config.n_layer)]),
+            ln_f = nn.LayerNorm(config.n_embd),
+        ))
+        self.mlm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.rope = RotaryEmbedding(config.n_embd // config.n_head, max_seq_len=config.block_size)
+    
+    def forward(self, idx, token_type_ids=None, attention_mask=None, labels=None):
+        B, T = idx.shape
+        x = self.transformer.wte(idx)
+        
+        if token_type_ids is not None:
+            x = x + self.transformer.wpe(token_type_ids)
+            
+        x = self.transformer.drop(x)
+        cos, sin = self.rope(T, idx.device)
+        
+        for block in self.transformer.h:
+            x = block(x, cos, sin, attention_mask)
+            
+        x = self.transformer.ln_f(x)
+        logits = self.mlm_head(x)
+        
+        loss = None
+        if labels is not None:
+            # Shift not needed for MLM (unlike causal LM)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
+            
+        return logits, loss
+
+# ==========================================
+# 7. DATA SIMULATION (FOR EXECUTION TESTING)
 # ==========================================
 class SyntheticQADataset(Dataset):
     def __init__(self, num_samples, block_size, vocab_size):
