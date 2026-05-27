@@ -6,18 +6,35 @@ from gpt_extend import HighContextMLMModel, QAEncoderConfig
 import warnings
 warnings.filterwarnings("ignore")
 
+import argparse
+
 def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    parser = argparse.ArgumentParser(description="Pre-train MLM Model")
+    parser.add_argument("--full", action="store_true", help="Run full pretraining on the entire train split")
+    parser.add_argument("--steps", type=int, default=None, help="Force a specific max steps cap")
+    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for training")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    args = parser.parse_args()
+
+    # Hardware acceleration detection: CUDA -> MPS (for Apple Silicon Mac) -> CPU
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     print(f"Using device: {device}")
 
     print("Loading tokenizer...")
-    tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+    tokenizer = GPT2TokenizerFast.from_pretrained('openai-community/gpt2')
     tokenizer.pad_token = tokenizer.eos_token
     # Add a specific mask token if not present
     tokenizer.add_special_tokens({'mask_token': '[MASK]'})
 
-    print("Loading Wikipedia dataset subset (wikitext-2-raw-v1)...")
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train[:1%]") # Use very small subset for testing
+    # If --full is provided, use the entire 'train' split; otherwise, use 1% subset for quick testing
+    split_name = "train" if args.full else "train[:1%]"
+    print(f"Loading Wikipedia dataset subset (wikitext-2-raw-v1, split={split_name})...")
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split=split_name)
 
     print("Tokenizing dataset...")
     def tokenize_function(examples):
@@ -61,10 +78,14 @@ def main():
         
         return input_ids, attention_mask, labels
 
-    dataloader = DataLoader(tokenized_datasets, batch_size=8, shuffle=True, collate_fn=mlm_collate_fn)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    dataloader = DataLoader(tokenized_datasets, batch_size=args.batch_size, shuffle=True, collate_fn=mlm_collate_fn)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
-    print("Starting Pre-training Dry Run (max 20 steps)...")
+    # Calculate step constraints
+    max_steps = args.steps if args.steps is not None else (3000 if args.full else 20)
+    print_freq = 100 if args.full else 5
+
+    print(f"Starting Pre-training ({'Full Run' if args.full else 'Dry Run'} | max {max_steps} steps)...")
     model.train()
     
     for step, (inputs, masks, labels) in enumerate(dataloader):
@@ -81,13 +102,13 @@ def main():
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         
-        if step % 5 == 0:
+        if step % print_freq == 0:
             print(f"Pre-train Step {step} | MLM Loss: {loss.item():.4f}")
             
-        if step >= 20: # Cap for dry run
+        if step >= max_steps:
             break
             
-    print("Pre-training Dry Run successful!")
+    print("Pre-training completed successfully!")
     
     # Save base backbone weights
     torch.save(model.transformer.state_dict(), "pretrained_encoder.pt")
