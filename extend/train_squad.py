@@ -87,6 +87,15 @@ class RealQADataset(Dataset):
         return input_ids, token_type_ids, attention_mask, torch.tensor(start_token_pos), torch.tensor(end_token_pos)
 
 import argparse
+import math
+
+def get_lr(step, warmup_steps, max_steps, max_lr, min_lr):
+    if step < warmup_steps:
+        return max_lr * (step + 1) / warmup_steps
+    if step >= max_steps:
+        return min_lr
+    progress = (step - warmup_steps) / (max_steps - warmup_steps)
+    return min_lr + 0.5 * (max_lr - min_lr) * (1 + math.cos(math.pi * progress))
 
 def main():
     parser = argparse.ArgumentParser(description="Fine-tune QA Model on SQuAD")
@@ -137,6 +146,11 @@ def main():
     max_steps = args.steps if args.steps is not None else (3000 if args.full else 20)
     print_freq = 100 if args.full else 5
 
+    # Learning rate schedule hyperparameters
+    max_lr = args.lr
+    min_lr = max_lr * 0.1
+    warmup_steps = min(500, int(0.1 * max_steps)) if args.full else 2 # 10% warmup up to 500 steps
+
     print(f"Starting SQuAD Fine-Tuning ({'Full Run' if args.full else 'Dry Run'} | max {max_steps} steps)...")
     model.train()
     
@@ -144,6 +158,11 @@ def main():
         inputs, token_type_ids, masks = inputs.to(device), token_type_ids.to(device), masks.to(device)
         start_targets, end_targets = start_targets.to(device), end_targets.to(device)
         
+        # Update learning rate using cosine scheduler
+        lr = get_lr(step, warmup_steps, max_steps, max_lr, min_lr)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
+            
         start_logits, end_logits, loss = model(
             idx=inputs, 
             token_type_ids=token_type_ids, 
@@ -157,7 +176,7 @@ def main():
         optimizer.step()
         
         if step % print_freq == 0:
-            print(f"Fine-tune Step {step} | QA Loss: {loss.item():.4f}")
+            print(f"Fine-tune Step {step} | QA Loss: {loss.item():.4f} | LR: {lr:.2e}")
             
         if step >= max_steps:
             break
